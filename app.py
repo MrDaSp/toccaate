@@ -6,11 +6,9 @@ import json
 import os
 from flask import Flask, request, redirect, url_for, render_template_string, abort, jsonify
 
-# ====== CONFIG ======
 KOFI_URL = "https://ko-fi.com/toccaate"
 DATA_FILE = "data.json"
 REQUIRED_PACKAGES = ["flask"]
-# ====================
 
 def ensure_packages(pkgs):
     missing = []
@@ -19,12 +17,11 @@ def ensure_packages(pkgs):
             __import__(p)
         except ImportError:
             missing.append(p)
-    if not missing:
-        return
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
-    except Exception:
-        sys.exit(1)
+    if missing:
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
+        except Exception:
+            sys.exit(1)
 
 ensure_packages(REQUIRED_PACKAGES)
 
@@ -39,9 +36,6 @@ def load_data():
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-
-# id -> {title, options, picked, history}
-CHOICES = load_data()
 
 BASE_HTML = """
 <!doctype html>
@@ -78,8 +72,8 @@ BASE_HTML = """
 </html>
 """
 
-def render_page(title: str, inner_html: str):
-    return render_template_string(BASE_HTML, title=title, content=inner_html)
+def render_page(title, inner):
+    return render_template_string(BASE_HTML, title=title, content=inner)
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -92,14 +86,15 @@ def index():
             <p>Devi darmi almeno 2 opzioni.</p>
             <p><a class="btn secondary" href="/">Torna indietro</a></p>
             """)
+        data = load_data()
         choice_id = str(uuid.uuid4())
-        CHOICES[choice_id] = {
+        data[choice_id] = {
             "title": request.form.get("title", "").strip() or "ToccaATE",
             "options": opts,
             "picked": None,
             "history": []
         }
-        save_data(CHOICES)
+        save_data(data)
         return redirect(url_for("share", choice_id=choice_id))
 
     return render_page("ToccaATE", """
@@ -120,8 +115,9 @@ def index():
 
 @app.route("/share/<choice_id>")
 def share(choice_id):
-    data = CHOICES.get(choice_id)
-    if not data:
+    data = load_data()
+    item = data.get(choice_id)
+    if not item:
         abort(404)
     share_link = request.host_url.strip("/") + url_for("decide_for_friend", choice_id=choice_id)
     wait_link = url_for("wait_for_choice", choice_id=choice_id)
@@ -145,15 +141,16 @@ def share(choice_id):
 
 @app.route("/wait/<choice_id>")
 def wait_for_choice(choice_id):
-    data = CHOICES.get(choice_id)
-    if not data:
+    data = load_data()
+    item = data.get(choice_id)
+    if not item:
         abort(404)
     status_url = url_for("status", choice_id=choice_id)
     result_url = url_for("result", choice_id=choice_id)
-    current_count = len(data["history"])
+    current_count = len(item["history"])
     return render_page("ToccaATE - In attesa", f"""
     <span class="badge">Attesa</span>
-    <h1>{data['title']}</h1>
+    <h1>{item['title']}</h1>
     <p>Lascia aperto, aggiorno qui sotto.</p>
     <div id="last-choice" style="margin-top:12px;"></div>
     <div id="all-choices" style="margin-top:10px;"></div>
@@ -162,7 +159,6 @@ def wait_for_choice(choice_id):
     </p>
     <script>
       let lastCount = {current_count};
-
       function renderList(items) {{
         const box = document.getElementById("all-choices");
         box.innerHTML = "";
@@ -173,14 +169,11 @@ def wait_for_choice(choice_id):
           box.appendChild(div);
         }});
       }}
-
       async function poll() {{
         try {{
           const res = await fetch("{status_url}");
           const d = await res.json();
-          if (d.history) {{
-            renderList(d.history);
-          }}
+          if (d.history) renderList(d.history);
           if (d.count > lastCount) {{
             lastCount = d.count;
             document.getElementById("last-choice").textContent = "Nuova scelta: " + d.picked;
@@ -194,41 +187,43 @@ def wait_for_choice(choice_id):
 
 @app.route("/status/<choice_id>")
 def status(choice_id):
-    data = CHOICES.get(choice_id)
-    if not data:
+    data = load_data()
+    item = data.get(choice_id)
+    if not item:
         return jsonify({"error": "not found"}), 404
     return jsonify({
-        "picked": data["picked"],
-        "title": data["title"],
-        "options": data["options"],
-        "count": len(data["history"]),
-        "history": data["history"],
+        "picked": item["picked"],
+        "title": item["title"],
+        "options": item["options"],
+        "count": len(item["history"]),
+        "history": item["history"],
     })
 
 @app.route("/r/<choice_id>")
 def result(choice_id):
-    data = CHOICES.get(choice_id)
-    if not data:
+    data = load_data()
+    item = data.get(choice_id)
+    if not item:
         abort(404)
 
-    if data["picked"] is None:
-        first = random.choice(data["options"])
-        data["picked"] = first
-        data["history"].append(first)
-        save_data(CHOICES)
+    if item["picked"] is None:
+        first = random.choice(item["options"])
+        item["picked"] = first
+        item["history"].append(first)
+        data[choice_id] = item
+        save_data(data)
 
     index_url = url_for("index")
     share_link = request.host_url.strip("/") + url_for("decide_for_friend", choice_id=choice_id)
     history_html = "".join(
         f"<div class='history-item'>#{i}: {h}</div>"
-
-        for i, h in enumerate(data["history"], 1)
+        for i, h in enumerate(item["history"], 1)
     )
 
     return render_page("ToccaATE - Risultato", f"""
     <span class="badge">La scelta di ToccaATE</span>
-    <h1>{data['title']}</h1>
-    <div class="result">{data['picked']}</div>
+    <h1>{item['title']}</h1>
+    <div class="result">{item['picked']}</div>
     <p class="small">Link per far scegliere ancora:</p>
     <input class="readonly-like" value="{share_link}" onclick="this.select()" readonly>
     <h2 style="font-size:1rem;margin-top:18px;">Scelte ricevute</h2>
@@ -238,24 +233,28 @@ def result(choice_id):
 
 @app.route("/decidi/<choice_id>", methods=["GET", "POST"])
 def decide_for_friend(choice_id):
-    data = CHOICES.get(choice_id)
-    if not data:
+    data = load_data()
+    item = data.get(choice_id)
+    if not item:
         abort(404)
+
     if request.method == "POST":
         picked = request.form.get("picked")
-        if picked in data["options"]:
-            data["picked"] = picked
-            data["history"].append(picked)
-            save_data(CHOICES)
+        if picked in item["options"]:
+            item["picked"] = picked
+            item["history"].append(picked)
+            data[choice_id] = item
+            save_data(data)
             return redirect(url_for("result", choice_id=choice_id))
 
     buttons_html = "".join(
         f'<button name="picked" value="{opt}" style="display:block;width:100%;margin-bottom:8px;">{opt}</button>'
-        for opt in data["options"]
+        for opt in item["options"]
     )
+
     return render_page("ToccaATE - Decidi", f"""
     <span class="badge">Tocca a TE 😎</span>
-    <h1>{data['title']}</h1>
+    <h1>{item['title']}</h1>
     <p>Scegli tu per l'altra persona:</p>
     <form method="post">
       {buttons_html}
